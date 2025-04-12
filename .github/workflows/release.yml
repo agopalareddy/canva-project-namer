@@ -1,0 +1,128 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags like v1.0, v2.1.1
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            asset_name_suffix: linux-amd64
+            asset_content_type: application/octet-stream
+            executable_name: file_namer
+          - os: macos-latest
+            asset_name_suffix: macos-amd64
+            asset_content_type: application/zip # macOS apps are often zipped
+            executable_name: file_namer # Nuitka might produce a .app bundle, handled below
+          - os: windows-latest
+            asset_name_suffix: windows-amd64
+            asset_content_type: application/vnd.microsoft.portable-executable
+            executable_name: file_namer.exe
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x' # Or specify a version like '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt # Path relative to repo root
+        pip install nuitka tkcalendar # Ensure Nuitka and tkcalendar are installed
+
+    - name: Build application
+      run: python build_app.py # Path relative to repo root
+      # Note: build_app.py might need adjustments for cross-platform builds
+      # For example, handling --macos-create-app-bundle if desired
+
+    - name: Prepare Artifact
+      shell: bash # Use bash for consistent commands across runners
+      run: |
+        ARTIFACT_DIR="./file_namer.dist" # Path relative to repo root
+        TARGET_NAME="file_namer-${{ matrix.asset_name_suffix }}"
+        EXECUTABLE_PATH="$ARTIFACT_DIR/${{ matrix.executable_name }}" # Path relative to repo root
+
+        echo "Checking for artifact directory: $ARTIFACT_DIR"
+        ls -l "$ARTIFACT_DIR"
+
+        if [[ "${{ runner.os }}" == "macOS" ]]; then
+          # Check if Nuitka created an app bundle
+          if [ -d "$ARTIFACT_DIR/file_namer.app" ]; then # Check relative path
+            echo "Found .app bundle, creating DMG..."
+            hdiutil create -volname "FileNamer" -srcfolder "$ARTIFACT_DIR/file_namer.app" -ov -format UDZO "${TARGET_NAME}.dmg" # Use relative path
+            echo "Created ${TARGET_NAME}.dmg"
+            # Optionally zip the .app bundle instead/as well
+            # echo "Zipping .app bundle..."
+            # zip -r "${TARGET_NAME}.zip" "$ARTIFACT_DIR/file_namer.app" # Use relative path
+            # echo "Created ${TARGET_NAME}.zip"
+          elif [ -f "$EXECUTABLE_PATH" ]; then # Check relative path
+            echo "Found executable, moving..."
+            mv "$EXECUTABLE_PATH" "./$TARGET_NAME" # Move from relative path to root
+            echo "Moved to ./$TARGET_NAME"
+            # Optionally zip the executable
+            # echo "Zipping executable..."
+            # zip "${TARGET_NAME}.zip" "./$TARGET_NAME"
+            # echo "Created ${TARGET_NAME}.zip"
+          else
+            echo "::error::Expected executable or .app bundle not found at $ARTIFACT_DIR for macOS" # Use relative path
+            exit 1
+          fi
+        elif [ -f "$EXECUTABLE_PATH" ]; then # Check relative path
+           echo "Found executable, moving..."
+           # On Windows runner, bash mv needs explicit extension if present
+           if [[ "${{ runner.os }}" == "Windows" ]]; then
+             mv "$EXECUTABLE_PATH" "./${TARGET_NAME}.exe" # Move from relative path to root
+             echo "Moved to ./${TARGET_NAME}.exe"
+           else
+             mv "$EXECUTABLE_PATH" "./$TARGET_NAME" # Move from relative path to root
+             echo "Moved to ./$TARGET_NAME"
+           fi
+        else
+           echo "::error::Expected executable not found at $EXECUTABLE_PATH for ${{ runner.os }}" # Use relative path
+           exit 1
+        fi
+
+    - name: Upload Artifact for Release
+      uses: actions/upload-artifact@v4
+      with:
+        name: file-namer-${{ matrix.os }}
+        path: |
+          ./file_namer-${{ matrix.asset_name_suffix }}* # Path remains the same as artifact is moved to root
+          # This will upload .exe, .dmg, .zip, or the raw binary based on the Prepare step
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to create releases
+
+    steps:
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts # Download all artifacts to 'artifacts' directory
+
+    - name: List downloaded artifacts # For debugging
+      run: ls -R artifacts
+
+    - name: Create Release and Upload Assets
+      uses: softprops/action-gh-release@v2
+      with:
+        # Extract files from the nested directories created by download-artifact
+        files: artifacts/*/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions
+      # Note: This action automatically uses the tag that triggered the workflow
+      # You might want to add release notes generation here later

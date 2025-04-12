@@ -1,0 +1,5 @@
+tkcalendar
+pyinstaller
+nuitka
+ordered-set
+zstandard
